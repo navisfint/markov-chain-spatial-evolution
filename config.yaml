@@ -1,0 +1,210 @@
+# ==============================================================================
+#  马尔科夫链动态演进分析 —— 主配置文件
+#  改这个文件就能跑，不用动 Python 代码
+# ==============================================================================
+#
+#  【怎么用】
+#  1. 把你的数据文件放进 data/ 目录（csv 或 xlsx 都行）
+#  2. 下面 data 段里把 file 改成你的文件名
+#  3. 想看哪个空间矩阵，就在 spatial_weights.active 里填哪个名字
+#  4. 运行：python src/main.py
+#
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# 一、数据输入
+# ------------------------------------------------------------------------------
+data:
+  # 数据文件名（放在 data/ 目录下）。支持 .csv / .xlsx / .xls
+  # ★ 换成你自己的文件名；先用代码自带的模拟数据试跑时保持 test_raw.csv 即可
+  file: "test_raw.csv"
+
+  # ---- 数据形态：auto / long / wide / wide_transposed / raw ----
+  #   auto             : 自动识别（推荐）。代码会看列结构自己判断
+  #   long             : 长表，一行一个"省-年"观测，已有算好的指数
+  #   wide             : 宽表，行=年份，列=省份，单元格是已经算好的指数值
+  #   wide_transposed  : 宽表的转置，行=省份，列=年份
+  #   raw              : 原始指标表（长表形态），代码内部用熵权-TOPSIS 合成指数
+  shape: "auto"
+
+  # ---- 长表 / 原始指标表的列名映射 ----
+  # 左边是代码认识的固定名字，右边填你文件里实际的列名
+  # 如果你的列名就是右边这些，这一整段可以不管
+  col_map:
+    province: "province"        # 省份列
+    year: "year"                # 年份列
+    # 已经算好的指数列（shape=long 时需要；shape=raw 时留空）
+    index_value: "cwt_index"
+
+  # ---- shape=raw 时：原始指标列怎么指定 ----
+  raw_indicators:
+    # mode: explicit 表示下面 indicator_cols 里列出的列才参与合成
+    #       all_numeric 表示除 province/year 外所有数值列都参与
+    mode: "all_numeric"
+    indicator_cols: []          # 例: ["per_gdp", "rnd_ratio", "beds_per_k"]
+    # ★ 指标方向：positive 正向（越大越好）/ negative 负向（越小越好）
+    #    负向指标必须写在这里，否则合成出的指数方向是错的
+    #    （常见负向：恩格尔系数、城乡收入比、失业率、废水排放量…）
+    directions:
+      urban_engel: "negative"                # 城镇居民恩格尔系数
+      urban_rural_income_gap: "negative"     # 城乡居民收入水平比
+      # per_gdp: "positive"
+      # rnd_ratio: "positive"
+    # 没在上面 directions 里写明的指标，默认按 positive 处理
+    default_direction: "positive"
+
+  # 缺值处理：drop 直接删掉含缺值的"省-年"样本 / interpolate 组内线性插值 / fill_mean 组内均值填充
+  missing: "interpolate"
+
+
+# ------------------------------------------------------------------------------
+# 二、等级划分（两套方法并列对比）
+# ------------------------------------------------------------------------------
+classification:
+  n_classes: 4                  # 分几档。论文是 4 档（Ⅰ/Ⅱ/Ⅲ/Ⅳ）
+  methods:                      # 要跑哪几套分级方法，可同时开
+    - "quartile"                # 四分位法：[0,25%) [25%,50%) [50%,75%) [75%,100%]
+    - "kmeans"                  # K 均值聚类，同样分 4 类
+
+  # ---- 四分位法的分位点基准（关键，别乱改）----
+  # pooled : 用全样本（所有年份所有省）的分位点，等级边界全程固定 —— 论文口径，推荐
+  # 逐年     : 每年单独算分位点，等级是"相对位置"，看的是相对排名变化
+  quartile_basis: "pooled"
+
+  kmeans:
+    # 用 KMeans 把指数分 4 档后，等级标签需要按指数均值从小到大重排为 Ⅰ→Ⅳ
+    # 这个参数控制是否重排。必须为 true，否则标签顺序会乱
+    order_labels: true
+    n_init: 10                  # 重启次数，越大越稳。数据量大时设 10 够用
+    random_state: 42            # 固定随机种子，保证每次结果一样
+    standardize: false          # 是否先标准化。单变量聚类没必要，保持 false
+
+
+# ------------------------------------------------------------------------------
+# 三、空间权重矩阵（可插拔，随时换）
+# ------------------------------------------------------------------------------
+spatial_weights:
+  # ★★★ 这里填你想用的矩阵名，填几个就跑几个并排对比 ★★★
+  # 可选：
+  #   adjacency      邻接矩阵 —— 地理相邻=1，否则=0
+  #   geographic     地理距离矩阵 —— 1/距离（反距离衰减）
+  #   economic       经济距离矩阵 —— 1/|人均GDP_i - 人均GDP_j|
+  #   eco_geographic 经济地理嵌套矩阵 —— 地理权重 × 经济权重（论文常用）
+  #   custom         自定义矩阵 —— 从 CSV 读你自己构造的矩阵
+  active:
+    - "adjacency"
+    - "geographic"
+    - "economic"
+    - "eco_geographic"
+
+  # 邻接矩阵用哪种邻接定义
+  adjacency:
+    # rook  : 只认有共同边界的省份（海南等岛屿会没有邻居，需见下方的 isolate_fix）
+    # bishop: 认有共同顶点或边界的省份（更宽容，岛屿省份也能有邻居）
+    # manual: 用下面 manual_edges 里手写的邻接关系
+    mode: "rook"
+    # 孤岛省份处理（如海南）：nearest 连最近的大陆省份 / none 保留为无邻居
+    isolate_fix: "nearest"
+    manual_edges: []            # 例: [["北京","天津"], ["广东","海南"]]
+
+  # 地理距离矩阵参数
+  geographic:
+    # 距离衰减函数的幂次：w = 1 / d^power
+    # power=1 是标准反距离；power=2 衰减更快、更强调近邻
+    power: 1.0
+    # 是否设置距离阈值：超过 threshold_km 的省份权重置 0（防止远距离弱连接干扰）
+    use_threshold: false
+    threshold_km: 3000
+
+  # 经济距离矩阵参数
+  economic:
+    # 用哪个经济变量算"距离"。填你的数据里有的列名
+    # 常见：人均GDP per_gdp / 人均可支配收入 income / GDP总量 gdp
+    variable: "per_gdp"
+    # 时间维度：跨年求均值后用（推荐）/ 逐年算矩阵（面板数据结构，计算量大）
+    time_agg: "mean"
+    # 是否取倒数：true 表示经济水平越接近权重越大（标准做法）
+    inverse: true
+
+  # 经济地理嵌套矩阵：直接对地理矩阵和经济矩阵做元素乘
+  eco_geographic:
+    # 两个矩阵的相乘方式：multiply 元素相乘 / weighted_sum 加权求和
+    combine: "multiply"
+    # weighted_sum 模式下的权重（multiply 模式忽略）
+    geo_weight: 0.5
+    eco_weight: 0.5
+
+  # 自定义矩阵：从 CSV 读
+  custom:
+    file: "spatial_weight_custom.csv"   # 放在 data/ 目录，行=省份、列=省份
+    province_col: "province"            # 省份名那一列的列名（没有就留空，表示用行索引）
+
+  # ---- 所有矩阵的通用处理 ----
+  standardize_rows: true        # 行标准化（每行除以行和）。空间马尔科夫链必须行标准化
+  diagonal_zero: true           # 对角线置 0（自己不是自己的邻居）
+  symmetry: "auto"              # auto 保持原样 / average 对称化 (W+W')/2 / max 取较大值
+
+
+# ------------------------------------------------------------------------------
+# 四、马尔科夫链设置
+# ------------------------------------------------------------------------------
+markov:
+  # ---- 传统马尔科夫链 ----
+  traditional:
+    enabled: true
+    # 转移期数：1 表示相邻年份的转移（t → t+1）
+    # 也可以设 2、3，看多年跨度的转移规律
+    lag: 1
+    # 概率估计方法。论文用的是极大似然法（MLE），即频数占比
+    #   mle : 极大似然，P_ij = n_ij / n_i  （推荐，论文口径）
+    #   bayes: 贝叶斯平滑，加伪计数，避免小样本时出现过多 0
+    estimator: "mle"
+    bayes_prior: 1.0            # estimator=bayes 时的伪计数
+
+  # ---- 空间马尔科夫链 ----
+  spatial:
+    enabled: true
+    # 邻居滞后值的计算方式
+    #   weighted_mean : 邻居加权均值（论文口径，用 W 加权）
+    #   simple_mean   : 邻居简单平均（不看权重，只看谁是谁的邻居）
+    neighbor_stat: "weighted_mean"
+    # 用什么给邻居分组：等级标签还是原始指数值
+    #   class      : 先按邻居加权均值再分 4 档等级（论文口径，产出 4×4×4 的三维转移矩阵）
+    #   value_block: 按邻居均值的中位数分"高/低"两组，产出 2×4×4（更简洁）
+    neighbor_grouping: "class"
+    # neighbor_grouping=value_block 时的分组数（2 或 3）
+    value_block_bins: 2
+
+  # ---- 附加输出 ----
+  extras:
+    steady_state: true          # 稳态分布（长期极限分布）π
+    expected_duration: true     # 各等级的期望持续时间（1/(1-P_ii)）
+    ergodicity_test: true       # 遍历性检验（是否存在吸收态 / 不可约）
+    chi_square_test: true       # 转移矩阵的卡方独立性检验（"转移是否随机"）
+    mpr_comparison: true        # 各等级的传统矩阵 vs 空间矩阵对比（看空间溢出）
+
+
+# ------------------------------------------------------------------------------
+# 五、输出设置
+# ------------------------------------------------------------------------------
+output:
+  dir: "output"                 # 输出根目录
+  save_csv: true                # 结果表存 CSV
+  save_excel: true              # 结果表汇总存一个 Excel（多 sheet，方便看）
+  save_figures: true            # 出图
+  fig_format: "png"             # png / pdf / svg
+  fig_dpi: 300                  # 图片分辨率
+  # 出图时用的中文字体。Windows 一般用 SimHei / Microsoft YaHei
+  font_family: "SimHei"
+  # 生成核密度演进图（这是 Markdown 之外的加分项，能直观看到分布右移）
+  kernel_density: true
+  kernel_density_years: [2000, 2005, 2010, 2015, 2020, 2024]
+
+
+# ------------------------------------------------------------------------------
+# 六、日志
+# ------------------------------------------------------------------------------
+log:
+  level: "INFO"                 # DEBUG / INFO / WARNING
+  to_file: true                 # 同时写 output/run.log
